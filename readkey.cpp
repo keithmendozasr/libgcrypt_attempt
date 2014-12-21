@@ -23,7 +23,7 @@ const packet_info getPacketTag(ifstream &inFile)
     inFile.read(&header, 1);
 
     packet_info retVal;
-    retVal.format = (header & 128);
+    retVal.format = (header & 64);
     retVal.length_type = (header & 3);
     retVal.tag = (header &60) >> 2;
 
