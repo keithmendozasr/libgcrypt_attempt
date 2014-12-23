@@ -248,7 +248,7 @@ const uint16_t parsePrivateKeyCksum(const char *data, size_t &nextPos, size_t &d
     return cksum;
 }
 
-void parsePrivateKey(const string &fileName)
+gcry_sexp_t parsePrivateKey(const string &fileName)
 {
     ifstream inFile;
     inFile.exceptions(ifstream::failbit | ifstream::badbit);
@@ -265,15 +265,16 @@ void parsePrivateKey(const string &fileName)
     size_t dataLen = getBodyLength(inFile, info);
     cout<<"Key length: "<<dataLen<<endl;
 
+    gcry_sexp_t privKeySexp;
     shared_ptr<char> body(reinterpret_cast<char *>(gcry_calloc_secure(dataLen, sizeof(char))), [](void *p){ gcry_free(p); } );
     try
     {
         inFile.read(body.get(), dataLen);
         size_t nextPos = 0;
         gcry_sexp_t pubKeySexp =  getPublicKeySexp(body, nextPos, dataLen);
-        cout<<"Public key built"<<endl;
+        cout<<"Public key built. Content of pubKeySexp"<<endl;
+        gcry_sexp_dump(pubKeySexp);
 
-        //size_t nscanned;
         char *dataPtr = body.get();
         dataPtr += dataLen;
 
@@ -281,40 +282,38 @@ void parsePrivateKey(const string &fileName)
             throw string("Ran out of data for string-to-key convention");
 
         parseStringToKey(dataPtr, nextPos, dataLen);
-        nextPos = dataLen;
-
         const uint16_t privKeyCksum = parsePrivateKeyCksum(dataPtr, nextPos, dataLen);
         cout<<"Value of private key checksum: "<<privKeyCksum<<endl;
 
-        /*gcry_mpi_t d_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
-        dataSize -= nscanned;
+        size_t nscanned;
+        gcry_mpi_t d_mpi = readMPI(&dataPtr[nextPos], dataLen, nscanned);
+        dataLen -= nscanned;
         nextPos += nscanned;
         cout<<"d complete"<<endl;
 
         if(nextPos > dataLen)
             throw string("Ran out of data for p-mpi");
-        gcry_mpi_t p_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
-        dataSize -= nscanned;
+        gcry_mpi_t p_mpi = readMPI(&dataPtr[nextPos], dataLen, nscanned);
+        dataLen -= nscanned;
         nextPos += nscanned;
         cout<<"p complete"<<endl;
 
         if(nextPos > dataLen)
             throw string("Ran out of data for q-mpi");
-        gcry_mpi_t q_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
-        dataSize -= nscanned;
+        gcry_mpi_t q_mpi = readMPI(&dataPtr[nextPos], dataLen, nscanned);
+        dataLen -= nscanned;
         nextPos += nscanned;
         cout<<"q complete"<<endl;
 
         if(nextPos > dataLen)
             throw string("Ran out of data for u-mpi");
-        gcry_mpi_t u_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
-        dataSize -= nscanned;
+        gcry_mpi_t u_mpi = readMPI(&dataPtr[nextPos], dataLen, nscanned);
+        dataLen -= nscanned;
         nextPos += nscanned;
         cout<<"u complete"<<endl;
 
-        gcry_sexp_t privKeySexp;
         size_t errOff;
-        gcry_error_t gcry_err = gcry_sexp_build(&privKeySexp, &errOff, "(private-key(rsa(%S(d%m)(p%m)(q%m)(u%m))))", pubKeySexp, d_mpi, p_mpi, q_mpi, u_mpi);
+        gcry_error_t gcry_err = gcry_sexp_build(&privKeySexp, &errOff, "(private-key(rsa (n %S) (e %S) (d%m) (p%m)(q%m)(u%m)))", gcry_sexp_nth(pubKeySexp, 1), gcry_sexp_nth(pubKeySexp,3), d_mpi, p_mpi, q_mpi, u_mpi);
         if(gcry_err)
         {
             ostringstream errMsg;
@@ -324,10 +323,12 @@ void parsePrivateKey(const string &fileName)
             throw errMsg.str();
         }
         cout<<"Private key built"<<endl;
-        gcry_sexp_dump(privKeySexp);*/
-
+        gcry_sexp_dump(privKeySexp);
+        gcry_mpi_release(d_mpi);
+        gcry_mpi_release(p_mpi);
+        gcry_mpi_release(q_mpi);
+        gcry_mpi_release(u_mpi);
         gcry_sexp_release(pubKeySexp);
-        //gcry_sexp_release(privKeySexp);
     }
     catch(const ifstream::failure &e)
     {
@@ -336,6 +337,8 @@ void parsePrivateKey(const string &fileName)
         else
             throw e.what();
     }
+
+    return privKeySexp;
 }
 
 int main(int argc, char **argv)
@@ -378,7 +381,8 @@ int main(int argc, char **argv)
 
     try
     {
-        parsePrivateKey(keyFile);
+        gcry_sexp_t privKeySexp = parsePrivateKey(keyFile);
+        gcry_sexp_release(privKeySexp);
     }
     catch(const string &e)
     {
