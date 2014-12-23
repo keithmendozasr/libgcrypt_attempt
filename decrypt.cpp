@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <ctime>
 #include <array>
+#include <sstream>
 
 #define GCRPYT_NO_DEPRECATED
 #include <gcrypt.h>
@@ -52,34 +53,47 @@ bool initLibGcrypt()
     return retVal;
 }
 
-const packet_info getPacketTag(ifstream &inFile)
+const packet_info getPacketTag(const uint8_t data)
 {
-    uint8_t header;
-    inFile>>header;
-
     packet_info retVal;
-    retVal.format = (header & 64);
+    retVal.format = (data & 64);
     if(retVal.format)
     {
-        retVal.tag = (header & 63);
+        retVal.tag = (data & 63);
     }
     else
     {
-        retVal.length_type = (header & 3);
-        retVal.tag = (header &60) >> 2;
+        retVal.length_type = (data & 3);
+        retVal.tag = (data &60) >> 2;
     }
 
     return move(retVal);
 }
 
-const unsigned int getBodyLength(ifstream &inFile, const packet_info &p)
+const packet_info getPacketTag(ifstream &inFile)
 {
-    unsigned int retVal;
+    uint8_t header;
+    inFile>>header;
+
+    return move(getPacketTag(header));
+}
+
+void printPacketInfo(const packet_info &p)
+{
+    cout<<"Format: "<<(p.format ? "New" : "Old")<<endl;
+    if(!p.format)
+        cout<<"Length type: "<<(unsigned short)p.length_type<<endl;
+    cout<<"Packet tag: "<<(unsigned short)p.tag<<endl;
+}
+
+const size_t getBodyLength(ifstream &inFile, const packet_info &p)
+{
+    size_t retVal;
 
     switch(p.length_type)
     {
     case 3:
-        throw string("Length is indeterminate type");
+        throw out_of_range("Length is indeterminate type");
     case 0:
         cout<<"Length is 1 octet"<<endl;
         uint8_t oneOctet;
@@ -100,7 +114,7 @@ const unsigned int getBodyLength(ifstream &inFile, const packet_info &p)
         break;
     }
 
-    return move(retVal);
+    return retVal;
 }
 
 gcry_mpi_t readMPI(const char* buf, const size_t &bufLen, size_t &nscanned)
@@ -123,22 +137,31 @@ gcry_mpi_t readMPI(const char* buf, const size_t &bufLen, size_t &nscanned)
     return retVal;
 }
 
-void getPublicKeyPacketInfo(weak_ptr<char> data, size_t dataSize)
+gcry_sexp_t getPublicKeySexp(weak_ptr<char> data, size_t &nextPos, size_t &dataSize)
 {
     uint8_t ver;
     uint32_t createTime;
     uint8_t algorithm;
+    gcry_sexp_t sexp;
 
     if(auto ptr = data.lock())
     {
-        const char * dataPtr = ptr.get();
-        ver = dataPtr[0];
-        memmove(&createTime, &(dataPtr[1]), sizeof(uint32_t));
-        createTime = ntohl(createTime);
-        algorithm = dataPtr[5];
+        cout<<__PRETTY_FUNCTION__<<" Starting dataSize: "<<dataSize<<endl;
 
-        dataSize -= 7;
-        size_t nextPos=6;
+        const char * dataPtr = ptr.get();
+
+        ver = dataPtr[nextPos];
+        dataSize--;
+        nextPos++;
+
+        memmove(&createTime, &(dataPtr[nextPos]), sizeof(uint32_t));
+        nextPos += sizeof(uint32_t);
+        dataSize -= sizeof(uint32_t);
+        createTime = ntohl(createTime);
+
+        algorithm = dataPtr[nextPos];
+        nextPos++;
+        dataSize--;
 
         cout<<"Version: "<<ver<<endl
             <<"Create time: ";
@@ -161,20 +184,68 @@ void getPublicKeyPacketInfo(weak_ptr<char> data, size_t dataSize)
         dataSize-= nscanned;
         nextPos += nscanned;
 
+        if(!dataSize)
+            throw string("Ran out of room for exponent portion of public key");
+
         gcry_mpi_t exponent = readMPI(&dataPtr[nextPos], dataSize, nscanned);
-        gcry_mpi_release(modulus);
-        gcry_mpi_release(exponent);
+        dataSize -= nscanned;
+        nextPos += nscanned;
+        
+        size_t errOff;
+        gcry_error_t gcry_err = gcry_sexp_build(&sexp, &errOff, "(n%m)(e%m)", modulus, exponent);
+        if(gcry_err)
+        {
+            ostringstream errMsg;
+            errMsg << "Error encoutered building s-expression for public key. Source: "<<gcry_strsource(gcry_err)
+                <<" Error: "<< gcry_strerror(gcry_err)
+                <<" Format offset: " << errOff;
+            throw errMsg.str();
+        }
+
+        cout<<"Ending dataSize: "<<dataSize<<endl;
     }
     else
-        throw string("Expired shared_ptr parameter provided");
+        throw invalid_argument("Expired shared_ptr parameter provided");
+
+    return move(sexp);
 }
 
-void printPacketInfo(const packet_info &p)
+void parseStringToKey(const char *data, size_t &nextPos, size_t &dataSize)
 {
-    cout<<"Format: "<<(p.format ? "New" : "Old")<<endl;
-    if(!p.format)
-        cout<<"Length type: "<<(unsigned short)p.length_type<<endl;
-    cout<<"Packet tag: "<<(unsigned short)p.tag<<endl;
+    if(data)
+    {
+        cout<<__PRETTY_FUNCTION__<<" Starting value of dataSize: "<<dataSize<<endl;
+
+        char s2k = data[nextPos];
+        cout<<"Value of s2k: "<<(int)s2k<<endl;
+
+        nextPos++;
+        dataSize--;
+
+        if(s2k)
+            throw out_of_range("String-to-key other than 0 is not supported");
+    }
+    else
+        throw invalid_argument("NULL pointer provided to \"data\" parameter");
+}
+
+const uint16_t parsePrivateKeyCksum(const char *data, size_t &nextPos, size_t &dataSize)
+{
+    uint16_t cksum;
+    if(data)
+    {
+        memmove(&cksum, &data[nextPos], sizeof(cksum));
+        cksum = ntohs(cksum);
+        cout<<"Value of cksum: "<<cksum<<endl;
+
+        dataSize-= sizeof(cksum);
+        nextPos += sizeof(cksum);
+        cout<<__PRETTY_FUNCTION__<<" Ending value of dataSize: "<<dataSize<<endl;
+    }
+    else
+        throw invalid_argument("Expired share_ptr provided");
+
+    return cksum;
 }
 
 void parsePrivateKey(const string &fileName)
@@ -191,12 +262,80 @@ void parsePrivateKey(const string &fileName)
     if(info.format)
         throw move(string("Unable to handle new format packet at this time"));
     cout<<"Parse out public key part"<<endl;
-    const unsigned int keyDataLen = getBodyLength(inFile, info);
-    cout<<"Key length: "<<keyDataLen<<endl;
+    size_t dataLen = getBodyLength(inFile, info);
+    cout<<"Key length: "<<dataLen<<endl;
 
-    shared_ptr<char> body(reinterpret_cast<char *>(gcry_calloc_secure(keyDataLen, sizeof(char))), [](void *p){ gcry_free(p); } );
-    inFile.read(body.get(), keyDataLen);
-    getPublicKeyPacketInfo(body, keyDataLen);
+    shared_ptr<char> body(reinterpret_cast<char *>(gcry_calloc_secure(dataLen, sizeof(char))), [](void *p){ gcry_free(p); } );
+    try
+    {
+        inFile.read(body.get(), dataLen);
+        size_t nextPos = 0;
+        gcry_sexp_t pubKeySexp =  getPublicKeySexp(body, nextPos, dataLen);
+        cout<<"Public key built"<<endl;
+
+        //size_t nscanned;
+        char *dataPtr = body.get();
+        dataPtr += dataLen;
+
+        if(nextPos > dataLen)
+            throw string("Ran out of data for string-to-key convention");
+
+        parseStringToKey(dataPtr, nextPos, dataLen);
+        nextPos = dataLen;
+
+        const uint16_t privKeyCksum = parsePrivateKeyCksum(dataPtr, nextPos, dataLen);
+        cout<<"Value of private key checksum: "<<privKeyCksum<<endl;
+
+        /*gcry_mpi_t d_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
+        dataSize -= nscanned;
+        nextPos += nscanned;
+        cout<<"d complete"<<endl;
+
+        if(nextPos > dataLen)
+            throw string("Ran out of data for p-mpi");
+        gcry_mpi_t p_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
+        dataSize -= nscanned;
+        nextPos += nscanned;
+        cout<<"p complete"<<endl;
+
+        if(nextPos > dataLen)
+            throw string("Ran out of data for q-mpi");
+        gcry_mpi_t q_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
+        dataSize -= nscanned;
+        nextPos += nscanned;
+        cout<<"q complete"<<endl;
+
+        if(nextPos > dataLen)
+            throw string("Ran out of data for u-mpi");
+        gcry_mpi_t u_mpi = readMPI(&dataPtr[nextPos], dataSize, nscanned);
+        dataSize -= nscanned;
+        nextPos += nscanned;
+        cout<<"u complete"<<endl;
+
+        gcry_sexp_t privKeySexp;
+        size_t errOff;
+        gcry_error_t gcry_err = gcry_sexp_build(&privKeySexp, &errOff, "(private-key(rsa(%S(d%m)(p%m)(q%m)(u%m))))", pubKeySexp, d_mpi, p_mpi, q_mpi, u_mpi);
+        if(gcry_err)
+        {
+            ostringstream errMsg;
+            errMsg << "Error encoutered building s-expression for private key. Source: "<<gcry_strsource(gcry_err)
+                <<" Error: "<< gcry_strerror(gcry_err)
+                <<" Format offset: " << errOff;
+            throw errMsg.str();
+        }
+        cout<<"Private key built"<<endl;
+        gcry_sexp_dump(privKeySexp);*/
+
+        gcry_sexp_release(pubKeySexp);
+        //gcry_sexp_release(privKeySexp);
+    }
+    catch(const ifstream::failure &e)
+    {
+        if(inFile.eof())
+            throw "Unexpected eof encountered";
+        else
+            throw e.what();
+    }
 }
 
 int main(int argc, char **argv)
